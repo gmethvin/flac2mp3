@@ -1,0 +1,145 @@
+#!/bin/bash
+
+# flac2mp3 script
+# Copyright (C) 2006-2011 Greg Methvin (greg@methvin.net)
+
+# Permission is hereby granted, free of charge, to any person obtaining a copy of
+# this software and associated documentation files (the "Software"), to deal in
+# the Software without restriction, including without limitation the rights to
+# use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+# of the Software, and to permit persons to whom the Software is furnished to do
+# so, subject to the following conditions:
+
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+
+# This script transcodes FLAC files to MP3. Requires flac, lame and id3v2.
+
+function usage {
+    cat <<EOT
+Usage: $(basename $0) [[-a|-c] -b <kbps> | -p <preset>] <file> [<file2>...]
+    options:
+      -b <kbps>    Set average or constant bitrate for mp3 (constant is default)
+                   <kbps>: 32 40 48 56 64 80 96 112 128 160 192 224 256 320
+        -a         Encode mp3 at a variable bitrate averaging <kbps> kbps
+        -c         Encode mp3 at a constant bitrate of <kbps> kbps
+      -p <preset>  Use a preset quality value:
+                   "-p medium": ~150-180kbps
+                   "-p standard": ~170-210kbps
+                   "-p extreme": ~200-240kbps (default)
+                   "-p insane": 320kbps CBR
+      -s <regex>   Apply sed regular expression to output filename:
+                   "-s 's/rip/\/media\/mp3player/'":
+                       Replaces 'rip' with '/media/mp3player'
+
+EOT
+    exit 1;
+}
+
+# Turn off input field separation to allow filenames with spaces
+IFS=
+
+bitrate=
+CBR_OPTS="--alt-preset cbr"
+ABR_OPTS="--alt-preset"
+br_opts=
+preset=extreme
+sedarg=
+
+while getopts ":p:acb:s:" options; do
+    case $options in
+        a) br_opts=$ABR_OPTS;;
+        c) br_opts=$CBR_OPTS;;
+        b) bitrate=$(echo "$OPTARG" | grep '^0*\(32\|40\|48\|56\|64\|80\|96\|112\|128\|160\|192\|224\|256\|320\)$')
+            [[ -z $bitrate ]] && usage;;
+        p) br_opts=$ABR_OPTS
+            bitrate=$(echo "$OPTARG" | grep '^\(medium\|standard\|extreme\|insane\)$')
+            [[ -z $preset ]] && usage;;
+        s) sedarg=$OPTARG;;
+        *) usage;;
+    esac
+done
+
+shift $(($OPTIND - 1))
+
+if [[ -z $* ]] || [[ -n $cbr ]] && [[ -z $bitrate ]]; then
+    usage
+elif [[ -z $br_opts ]] && [[ -n $bitrate ]]; then
+    br_opts=$CBR_OPTS
+fi
+
+if [[ -n $bitrate ]]; then
+    lame_opts="$br_opts $bitrate"
+else
+    lame_opts="$ABR_OPTS $preset"
+fi
+
+function flac2mp3_convert {
+    inf="$1"
+    outf="$2"
+
+    # Encode to MP3
+    echo
+    echo "input FLAC file: $inf"
+    echo "output MP3 file: $outf"
+    bash -c "flac -c -d \"$inf\" | lame $lame_opts - \"$outf\""
+
+    # check if we have an output file
+    [[ -f $outf ]] || return 1
+
+    # Get ID3 info
+    ARTIST=$(metaflac "$inf" --show-tag=ARTIST | sed s/ARTIST=//g)
+    TITLE=$(metaflac "$inf" --show-tag=TITLE | sed s/TITLE=//g)
+    ALBUM=$(metaflac "$inf" --show-tag=ALBUM | sed s/ALBUM=//g)
+    GENRE=$(metaflac "$inf" --show-tag=GENRE | sed s/GENRE=//g)
+    TRACKNUMBER=$(metaflac "$inf" --show-tag=TRACKNUMBER \
+        | sed s/TRACKNUMBER=//g)
+    YEAR=$(metaflac "$inf" --show-tag=DATE \
+        | sed s/DATE=//g | cut -b -4)
+
+    # Set ID3 tags (assume id3v2)
+    echo
+    echo "Setting ID3 tags"
+    echo
+
+    id3v2 -t "$TITLE" -T "$TRACKNUMBER" \
+        -a "$ARTIST" -A "$ALBUM" -y "$YEAR" -g "$GENRE" \
+        "$outf" > /dev/null
+    id3v2 -l "$outf"
+    return 0
+}
+
+count=0
+for inf in $*; do
+    # Check if the file exists
+    if [[ ! -f $inf ]]; then
+        echo "$inf: No such file.">&2
+        continue
+    fi
+
+    # Set output filename   
+    outf=${inf%.*}.mp3
+    if [[ -n $sedarg ]]; then
+        outf=$(echo "$outf" | sed "$sedarg")
+        mkdir -p "$(dirname "$outf")"
+    fi
+
+    # Do the conversion on this file and increment if we created the file
+    if [[ $outf != $inf ]]; then
+        flac2mp3_convert "$inf" "$outf" && let count++
+    fi
+done
+
+echo
+echo "$count MP3 files created."
+echo
+
+
